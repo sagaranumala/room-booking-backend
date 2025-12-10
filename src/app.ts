@@ -9,7 +9,7 @@ import { Server } from 'socket.io';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
-import { createServer } from 'http';
+import { createServer, Server as HTTPServer } from 'http';
 
 // Import routes
 import authRoutes from './routes/auth.routes';
@@ -18,21 +18,50 @@ import bookingRoutes from './routes/bookings.routes';
 import roomRoutes from './routes/rooms.routes';
 
 // Import types
-import { ApiResponse, Booking } from './types/index';
+import { ApiResponse, Booking} from './types/index';
 
 // Load environment variables
 dotenv.config();
 
-// Create Express app
+// -------------------- Type Definitions --------------------
+interface ProcessEnv {
+  PORT?: string;
+  NODE_ENV?: string;
+  MONGODB_URI?: string;
+  CORS_ORIGIN?: string;
+  JWT_SECRET?: string;
+}
+
+interface MongoError extends Error {
+  code?: number;
+  keyPattern?: Record<string, unknown>;
+  keyValue?: Record<string, unknown>;
+}
+
+interface CastError extends Error {
+  path?: string;
+  value?: unknown;
+  kind?: string;
+}
+
+interface JwtError extends Error {
+  expiredAt?: Date;
+}
+
+interface ExtendedRequest extends Request {
+  io?: Server;
+}
+
+// -------------------- App Configuration --------------------
 const app: Application = express();
-const PORT = process.env.PORT || 5000;
-const NODE_ENV = process.env.NODE_ENV || 'development';
+const PORT: number = parseInt(process.env.PORT || '5000', 10);
+const NODE_ENV: string = process.env.NODE_ENV || 'development';
 
 // Create HTTP server (for Socket.io)
-const httpServer = createServer(app);
+const httpServer: HTTPServer = createServer(app);
 
 // Initialize Socket.io (optional, for real-time features)
-const io = new Server(httpServer, {
+const io: Server = new Server(httpServer, {
   cors: {
     origin: process.env.CORS_ORIGIN || '*',
     credentials: true
@@ -41,7 +70,7 @@ const io = new Server(httpServer, {
 });
 
 // Store for real-time room availability
-const activeBookings = new Map();
+const activeBookings = new Map<string, Booking>();
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
@@ -87,9 +116,7 @@ io.on('connection', (socket) => {
 // Make Socket.io available in routes (optional)
 app.set('io', io);
 
-// ====================
-// SECURITY MIDDLEWARE
-// ====================
+// -------------------- Security Middleware --------------------
 
 // Helmet for security headers
 app.use(helmet({
@@ -98,7 +125,7 @@ app.use(helmet({
 }));
 
 // CORS configuration
-const corsOptions = {
+const corsOptions: cors.CorsOptions = {
   origin: process.env.CORS_ORIGIN 
     ? process.env.CORS_ORIGIN.split(',') 
     : ['http://localhost:3000', 'http://localhost:5173'],
@@ -122,17 +149,21 @@ const limiter = rateLimit({
 // Apply rate limiting to all API routes
 app.use('/api/', limiter);
 
-// ====================
-// APPLICATION MIDDLEWARE
-// ====================
+// -------------------- Application Middleware --------------------
 
 // Request logging
 if (NODE_ENV === 'development') {
   app.use(morgan('dev'));
 } else {
+  // Create logs directory if it doesn't exist
+  const logsDir = path.join(__dirname, 'logs');
+  if (!fs.existsSync(logsDir)) {
+    fs.mkdirSync(logsDir, { recursive: true });
+  }
+  
   // Create a write stream for production logs
   const accessLogStream = fs.createWriteStream(
-    path.join(__dirname, 'logs', 'access.log'),
+    path.join(logsDir, 'access.log'),
     { flags: 'a' }
   );
   app.use(morgan('combined', { stream: accessLogStream }));
@@ -148,11 +179,9 @@ app.use(compression());
 // Static files (if you have any)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// ====================
-// DATABASE CONNECTION
-// ====================
+// -------------------- Database Connection --------------------
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/booking-system';
+const MONGODB_URI: string = process.env.MONGODB_URI || 'mongodb://localhost:27017/booking-system';
 
 mongoose.set('strictQuery', true);
 
@@ -166,7 +195,7 @@ const connectDB = async (): Promise<void> => {
       console.log('📊 MongoDB Connection Status: Connected');
     });
     
-    mongoose.connection.on('error', (err) => {
+    mongoose.connection.on('error', (err: Error) => {
       console.error('❌ MongoDB Connection Error:', err);
     });
     
@@ -181,15 +210,13 @@ const connectDB = async (): Promise<void> => {
       process.exit(0);
     });
     
-  } catch (error) {
+  } catch (error: unknown) {
     console.error('❌ MongoDB Connection Failed:', error);
     process.exit(1);
   }
 };
 
-// ====================
-// HEALTH CHECK & MONITORING
-// ====================
+// -------------------- Health Check & Monitoring --------------------
 
 app.get('/health', (req: Request, res: Response) => {
   const healthcheck: ApiResponse = {
@@ -226,9 +253,7 @@ app.get('/status', (req: Request, res: Response) => {
   });
 });
 
-// ====================
-// API ROUTES
-// ====================
+// -------------------- API Routes --------------------
 
 // Welcome route
 app.get('/api', (req: Request, res: Response) => {
@@ -252,9 +277,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/rooms', roomRoutes);
 
-// ====================
-// ERROR HANDLING MIDDLEWARE
-// ====================
+// -------------------- Error Handling Middleware --------------------
 
 // 404 Handler
 app.use('*', (req: Request, res: Response) => {
@@ -266,7 +289,7 @@ app.use('*', (req: Request, res: Response) => {
 });
 
 // Global error handler
-app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
+app.use((error: Error, req: ExtendedRequest, res: Response, next: NextFunction) => {
   console.error('🚨 Global Error Handler:', {
     error: error.message,
     stack: error.stack,
@@ -277,7 +300,7 @@ app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
     query: req.query
   });
 
-  // Mongoose errors
+  // Mongoose validation errors
   if (error.name === 'ValidationError') {
     return res.status(400).json({
       success: false,
@@ -286,19 +309,25 @@ app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
     });
   }
 
-  if (error.name === 'MongoError' && (error as any).code === 11000) {
-    return res.status(409).json({
-      success: false,
-      message: 'Duplicate key error',
-      error: 'A record with this value already exists'
-    });
+  // MongoDB duplicate key errors
+  if (error.name === 'MongoError') {
+    const mongoError = error as MongoError;
+    if (mongoError.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: 'Duplicate key error',
+        error: 'A record with this value already exists'
+      });
+    }
   }
 
+  // Mongoose cast errors
   if (error.name === 'CastError') {
+    const castError = error as CastError;
     return res.status(400).json({
       success: false,
       message: 'Invalid ID format',
-      error: 'The provided ID is not valid'
+      error: `The provided value "${castError.value}" is not valid for ${castError.path}`
     });
   }
 
@@ -312,22 +341,28 @@ app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
   }
 
   if (error.name === 'TokenExpiredError') {
+    const jwtError = error as JwtError;
     return res.status(401).json({
       success: false,
       message: 'Token expired',
-      error: 'Please login again'
+      error: `Token expired at ${jwtError.expiredAt?.toISOString() || 'unknown time'}. Please login again.`
     });
   }
 
-  // Default error response
-  const statusCode = (error as any).statusCode || 500;
+  // Custom error with status code
+  interface CustomError extends Error {
+    statusCode?: number;
+  }
+  
+  const customError = error as CustomError;
+  const statusCode = customError.statusCode || 500;
   const message = error.message || 'Internal Server Error';
 
   res.status(statusCode).json({
     success: false,
     message: NODE_ENV === 'production' ? 'Something went wrong' : message,
-    error: NODE_ENV === 'development' ? error.stack : undefined,
     ...(NODE_ENV === 'development' && { 
+      error: error.stack,
       details: {
         name: error.name,
         message: error.message
@@ -336,11 +371,9 @@ app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
   });
 });
 
-// ====================
-// GRACEFUL SHUTDOWN
-// ====================
+// -------------------- Graceful Shutdown --------------------
 
-const gracefulShutdown = (signal: string) => {
+const gracefulShutdown = (signal: string): void => {
   console.log(`\n⚠️  Received ${signal}. Starting graceful shutdown...`);
   
   // Close HTTP server
@@ -366,11 +399,9 @@ const gracefulShutdown = (signal: string) => {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// ====================
-// START SERVER
-// ====================
+// -------------------- Start Server --------------------
 
-const startServer = async () => {
+const startServer = async (): Promise<void> => {
   try {
     // Connect to database
     await connectDB();
@@ -401,7 +432,8 @@ const startServer = async () => {
       console.log('\n🗄️  Database:');
       console.log(`   ✓ Connected to: ${mongoose.connection.name}`);
       console.log(`   ✓ Host: ${mongoose.connection.host}`);
-      console.log(`   ✓ Models: ${Object.keys(mongoose.connection.models).join(', ')}`);
+      const modelNames = Object.keys(mongoose.connection.models);
+      console.log(`   ✓ Models: ${modelNames.length > 0 ? modelNames.join(', ') : 'None'}`);
       
       // Log available routes
       console.log('\n📡 Available Routes:');
@@ -416,7 +448,7 @@ const startServer = async () => {
       console.log('   ✓ GET  /api/rooms/availability');
     });
     
-  } catch (error) {
+  } catch (error: unknown) {
     console.error('❌ Failed to start server:', error);
     process.exit(1);
   }

@@ -1,5 +1,7 @@
 // types/index.ts
 
+import { Types } from "mongoose";
+
 // User types
 export interface User {
   id: string;
@@ -134,4 +136,65 @@ declare global {
       user?: User;
     }
   }
+}
+
+export interface RoomAvailabilitySlots {
+  room: {
+    id: string;
+    name: string;
+    capacity: number;
+    amenities: string[];
+    description?: string;
+  };
+  date: string; // YYYY-MM-DD
+  availableSlots: AvailableSlotResponse[];
+  totalAvailableSlots: number;
+  isAvailable: boolean;
+  totalBookings: number;
+  nextAvailableSlot: string | null;
+  lastAvailableSlot: string | null;
+}
+
+export interface RoomAvailabilityData {
+  room: {
+    id: string;
+    name: string;
+    capacity: number;
+    amenities: string[];
+    description: string;
+  };
+  date: string;
+  availableSlots: string[]; // <-- array of date strings
+  totalAvailableSlots: number;
+  isAvailable: boolean;
+  totalBookings: number;
+  nextAvailableSlot: string | null; // <-- must match the type in availableSlots
+  lastAvailableSlot: string | null;
+}
+
+export interface BookingData {
+  _id: string;
+  roomId: Room;      // populated room object
+  userId: User;      // populated user object
+  status: BookingStatus;
+  startTime: string; // ISO string
+  endTime: string;   // ISO string
+  createdAt: string; // ISO string
+  updatedAt: string; // ISO string
+  __v: number;
+}
+
+export interface GroupedBooking {
+  room: {
+    id: Types.ObjectId;
+    name: string;
+    capacity: number;
+  };
+  bookings: Array<{
+    id: Types.ObjectId;
+    user: User; // You should define a proper User interface
+    startTime: Date;
+    endTime: Date;
+    status: string;
+  }>;
 }

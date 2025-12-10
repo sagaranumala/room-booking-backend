@@ -1,5 +1,4 @@
 import { Server } from "socket.io";
-import { Booking } from "../models/booking.model";
 
 let io: Server;
 
@@ -15,7 +14,7 @@ export const initSocket = (server: any) => {
     });
 };
 
-export const broadcastBookingCreated = (booking: Booking) => {
+export const broadcastBookingCreated = (booking: any) => {
     io.emit("booking-created", {
         bookingId: booking._id,
         roomId: booking.roomId,
@@ -29,7 +28,7 @@ export const broadcastBookingCancelled = (bookingId: string) => {
     io.emit("booking-cancelled", { bookingId });
 };
 
-export const broadcastBookingRescheduled = (booking: Booking) => {
+export const broadcastBookingRescheduled = (booking: any) => {
     io.emit("booking-rescheduled", {
         bookingId: booking._id,
         roomId: booking.roomId,

@@ -2,18 +2,37 @@ import BookingModel from '../models/booking.model';
 import { Booking } from '../types/index';
 import Room from '../models/room.model';
 import User from '../models/user.model';
+import { BookingStatus } from '../types/index';
 import { 
   isDateInPast, 
-  isOverlapping, 
   isValidBookingDuration 
 } from '../utils/date.util';
-import mongoose from 'mongoose';
+import mongoose, { FilterQuery, Types } from 'mongoose';
 
+// -------------------- Interfaces --------------------
 interface CreateBookingData {
   roomId: string;
   startTime: Date;
   endTime: Date;
 }
+
+interface RescheduleBookingData {
+  startTime: Date;
+  endTime: Date;
+}
+
+interface BookingQueryOptions {
+  status?: string;
+  limit?: number;
+  page?: number;
+}
+
+interface RoomBookingsQueryOptions extends BookingQueryOptions {
+  fromDate?: Date;
+  toDate?: Date;
+}
+
+// -------------------- Main Functions --------------------
 
 export const createBooking = async (
   bookingData: CreateBookingData, 
@@ -73,15 +92,15 @@ export const createBooking = async (
   await booking.save();
   
   // Populate room details
-   booking.populate('roomId', 'name capacity amenities');
-   booking.populate('userId', 'name email');
+  await booking.populate('roomId', 'name capacity amenities');
+  await booking.populate('userId', 'name email');
   
-  return booking;
+  return booking.toObject() as Booking;
 };
 
 export const rescheduleBooking = async (
   bookingId: string,
-  newTimes: { startTime: Date; endTime: Date },
+  newTimes: RescheduleBookingData,
   userId: string
 ): Promise<Booking> => {
   const { startTime, endTime } = newTimes;
@@ -106,7 +125,8 @@ export const rescheduleBooking = async (
   }
 
   // Check authorization
-  if (existingBooking.userId.toString() !== userId && !(await isAdmin(userId))) {
+  const isUserAdmin = await checkUserIsAdmin(userId);
+  if (existingBooking.userId.toString() !== userId && !isUserAdmin) {
     throw new Error('Not authorized to reschedule this booking');
   }
 
@@ -137,7 +157,7 @@ export const rescheduleBooking = async (
   await existingBooking.populate('roomId', 'name capacity');
   await existingBooking.populate('userId', 'name email');
 
-  return existingBooking;
+  return existingBooking.toObject() as Booking;
 };
 
 export const cancelBooking = async (
@@ -151,7 +171,8 @@ export const cancelBooking = async (
   }
 
   // Check authorization
-  if (booking.userId.toString() !== userId && !(await isAdmin(userId))) {
+  const isUserAdmin = await checkUserIsAdmin(userId);
+  if (booking.userId.toString() !== userId && !isUserAdmin) {
     throw new Error('Not authorized to cancel this booking');
   }
 
@@ -163,27 +184,23 @@ export const cancelBooking = async (
   booking.status = 'cancelled';
   await booking.save();
 
-  booking.populate('roomId', 'name');
-  booking.populate('userId', 'name email');
+  await booking.populate('roomId', 'name');
+  await booking.populate('userId', 'name email');
 
-  return booking;
+  return booking.toObject() as Booking;
 };
 
 export const getBookingsByUserId = async (
   userId: string,
-  options: { 
-    status?: string; 
-    limit?: number; 
-    page?: number 
-  } = {}
+  options: BookingQueryOptions = {}
 ): Promise<Booking[]> => {
   const { status, limit = 50, page = 1 } = options;
   const skip = (page - 1) * limit;
 
-  const query: any = { userId };
+  const query: FilterQuery<Booking> = { userId };
   
   if (status) {
-    query.status = status;
+    query.status = status as BookingStatus;
   }
 
   const bookings = await BookingModel.find(query)
@@ -191,20 +208,15 @@ export const getBookingsByUserId = async (
     .skip(skip)
     .limit(limit)
     .populate('roomId', 'name capacity amenities')
-    .populate('userId', 'name email');
+    .populate('userId', 'name email')
+    .lean();
 
-  return bookings;
+  return bookings as Booking[];
 };
 
 export const getBookingsByRoomId = async (
   roomId: string,
-  options: { 
-    fromDate?: Date; 
-    toDate?: Date;
-    status?: string;
-    limit?: number;
-    page?: number;
-  } = {}
+  options: RoomBookingsQueryOptions = {}
 ): Promise<Booking[]> => {
   const { 
     fromDate, 
@@ -215,10 +227,10 @@ export const getBookingsByRoomId = async (
   } = options;
   const skip = (page - 1) * limit;
 
-  const query: any = { roomId };
+  const query: FilterQuery<Booking> = { roomId };
   
   if (status) {
-    query.status = status;
+    query.status = status as BookingStatus;
   }
 
   if (fromDate && toDate) {
@@ -235,9 +247,10 @@ export const getBookingsByRoomId = async (
     .skip(skip)
     .limit(limit)
     .populate('roomId', 'name capacity')
-    .populate('userId', 'name email');
+    .populate('userId', 'name email')
+    .lean();
 
-  return bookings;
+  return bookings as Booking[];
 };
 
 export const getBookingById = async (
@@ -245,19 +258,14 @@ export const getBookingById = async (
 ): Promise<Booking | null> => {
   const booking = await BookingModel.findById(bookingId)
     .populate('roomId', 'name capacity amenities')
-    .populate('userId', 'name email role');
+    .populate('userId', 'name email role')
+    .lean();
   
-  return booking;
+  return booking as Booking | null;
 };
 
 export const getAllBookings = async (
-  options: {
-    status?: string;
-    fromDate?: Date;
-    toDate?: Date;
-    limit?: number;
-    page?: number;
-  } = {}
+  options: RoomBookingsQueryOptions = {}
 ): Promise<Booking[]> => {
   const { 
     status, 
@@ -268,10 +276,10 @@ export const getAllBookings = async (
   } = options;
   const skip = (page - 1) * limit;
 
-  const query: any = {};
+  const query: FilterQuery<Booking> = {};
   
   if (status) {
-    query.status = status;
+    query.status = status as BookingStatus;
   }
 
   if (fromDate && toDate) {
@@ -288,9 +296,10 @@ export const getAllBookings = async (
     .skip(skip)
     .limit(limit)
     .populate('roomId', 'name capacity')
-    .populate('userId', 'name email');
+    .populate('userId', 'name email')
+    .lean();
 
-  return bookings;
+  return bookings as Booking[];
 };
 
 export const getBookingsForRoom = async (
@@ -307,9 +316,10 @@ export const getBookingsForRoom = async (
     endTime: { $lte: endOfDay }
   })
     .sort({ startTime: 1 })
-    .populate('userId', 'name email');
+    .populate('userId', 'name email')
+    .lean();
 
-  return bookings;
+  return bookings as Booking[];
 };
 
 export const checkRoomAvailability = async (
@@ -318,7 +328,7 @@ export const checkRoomAvailability = async (
   endTime: Date,
   excludeBookingId?: string
 ): Promise<boolean> => {
-  const query: any = {
+  const query: FilterQuery<Booking> = {
     roomId,
     status: { $in: ['confirmed', 'active', 'pending'] },
     $or: [
@@ -327,15 +337,148 @@ export const checkRoomAvailability = async (
   };
 
   if (excludeBookingId) {
-    query._id = { $ne: excludeBookingId };
+    query._id = { $ne: new Types.ObjectId(excludeBookingId) };
   }
 
   const overlappingBookings = await BookingModel.find(query);
   return overlappingBookings.length === 0;
 };
 
-// Helper function to check if user is admin
-const isAdmin = async (userId: string): Promise<boolean> => {
-  const user = await User.findById(userId).select('role');
+// -------------------- Helper Functions --------------------
+
+const checkUserIsAdmin = async (userId: string): Promise<boolean> => {
+  const user = await User.findById(userId).select('role').lean();
   return user?.role === 'admin';
+};
+
+// -------------------- Additional Utility Functions --------------------
+
+export const getUpcomingBookings = async (
+  userId: string,
+  limit: number = 10
+): Promise<Booking[]> => {
+  const now = new Date();
+  
+  const bookings = await BookingModel.find({
+    userId,
+    startTime: { $gte: now },
+    status: { $in: ['confirmed', 'pending'] }
+  })
+    .sort({ startTime: 1 })
+    .limit(limit)
+    .populate('roomId', 'name capacity')
+    .lean();
+
+  return bookings as Booking[];
+};
+
+export const getPastBookings = async (
+  userId: string,
+  limit: number = 10
+): Promise<Booking[]> => {
+  const now = new Date();
+  
+  const bookings = await BookingModel.find({
+    userId,
+    endTime: { $lt: now },
+    status: 'confirmed'
+  })
+    .sort({ endTime: -1 })
+    .limit(limit)
+    .populate('roomId', 'name')
+    .lean();
+
+  return bookings as Booking[];
+};
+
+export const getBookingStats = async (
+  userId?: string
+): Promise<{
+  total: number;
+  upcoming: number;
+  past: number;
+  cancelled: number;
+}> => {
+  const now = new Date();
+  
+  const matchStage: Record<string, unknown> = {};
+  if (userId) {
+    matchStage.userId = new Types.ObjectId(userId);
+  }
+
+  const stats = await BookingModel.aggregate([
+    { $match: matchStage },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: 1 },
+        upcoming: {
+          $sum: {
+            $cond: [
+              { 
+                $and: [
+                  { $gte: ["$startTime", now] },
+                  { $eq: ["$status", "confirmed"] }
+                ]
+              },
+              1,
+              0
+            ]
+          }
+        },
+        past: {
+          $sum: {
+            $cond: [
+              { $lt: ["$endTime", now] },
+              1,
+              0
+            ]
+          }
+        },
+        cancelled: {
+          $sum: {
+            $cond: [
+              { $eq: ["$status", "cancelled"] },
+              1,
+              0
+            ]
+          }
+        }
+      }
+    }
+  ]);
+
+  return stats[0] || { total: 0, upcoming: 0, past: 0, cancelled: 0 };
+};
+
+// Check if a booking time conflicts with any existing booking
+export const checkBookingConflict = async (
+  roomId: string,
+  startTime: Date,
+  endTime: Date,
+  excludeBookingId?: string
+): Promise<{
+  hasConflict: boolean;
+  conflictingBookings: Booking[];
+}> => {
+  const query: FilterQuery<Booking> = {
+    roomId,
+    status: { $in: ['confirmed', 'active', 'pending'] },
+    $or: [
+      { startTime: { $lt: endTime }, endTime: { $gt: startTime } }
+    ]
+  };
+
+  if (excludeBookingId) {
+    query._id = { $ne: new Types.ObjectId(excludeBookingId) };
+  }
+
+  const conflictingBookings = await BookingModel.find(query)
+    .populate('userId', 'name email')
+    .lean();
+
+  return {
+    hasConflict: conflictingBookings.length > 0,
+    conflictingBookings: conflictingBookings as Booking[]
+  };
 };

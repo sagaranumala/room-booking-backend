@@ -1,350 +1,357 @@
 import { Request, Response } from 'express';
+import { z } from 'zod';
 import Room from '../models/room.model';
-import Booking from '../models/booking.model';
+import bookingSchema from '../models/booking.model';
 import { 
   calculateAvailableSlots, 
-  formatDateToYYYYMMDD,
-  isWithinBusinessHours 
+  formatDateToYYYYMMDD 
 } from '../utils/date.util';
-import { ApiResponse, AvailableSlotResponse, RoomAvailability } from '../types/index';
+import { FilterQuery } from 'mongoose';
+import { Booking, RoomAvailabilityData, RoomAvailabilitySlots } from '../types';
 
-// Create a new room (admin only)
+// -------------------- Zod Schemas --------------------
+const createRoomSchema = z.object({
+  name: z.string().min(1, "Name is required"),
+  capacity: z.number().int().positive("Capacity must be a positive number"),
+  description: z.string().optional(),
+  amenities: z.array(z.string()).optional(),
+});
+
+const updateRoomSchema = z.object({
+  name: z.string().optional(),
+  capacity: z.number().int().positive().optional(),
+  description: z.string().optional(),
+  amenities: z.array(z.string()).optional(),
+  isActive: z.boolean().optional(),
+});
+
+const dateQuerySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format YYYY-MM-DD"),
+  roomId: z.string().optional(),
+  showAll: z.string().optional(),
+});
+
+// Error type for MongoDB duplicate key errors
+interface MongoError extends Error {
+  code?: number;
+  keyValue?: Record<string, unknown>;
+}
+
+// -------------------- ROOM CRUD --------------------
+
+// Create Room
 export const createRoom = async (req: Request, res: Response): Promise<Response> => {
   try {
-    const { name, capacity, description, amenities } = req.body;
-
-    // Validation
-    if (!name || !capacity) {
-      return res.status(400).json({
-        success: false,
-        message: 'Name and capacity are required'
+    const parsed = createRoomSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ 
+        success: false, 
+        message: parsed.error
       });
     }
 
-    if (typeof capacity !== 'number' || capacity < 1) {
-      return res.status(400).json({
-        success: false,
-        message: 'Capacity must be a positive number'
-      });
-    }
+    const { name, capacity, description, amenities } = parsed.data;
 
-    // Check if room with same name already exists
     const existingRoom = await Room.findOne({ name });
     if (existingRoom) {
-      return res.status(409).json({
-        success: false,
-        message: 'Room with this name already exists'
+      return res.status(409).json({ 
+        success: false, 
+        message: 'Room with this name already exists' 
       });
     }
 
-    // Create new room
     const newRoom = await Room.create({
       name,
       capacity,
       description: description || '',
       amenities: amenities || [],
-      isActive: true
+      isActive: true,
     });
 
-    return res.status(201).json({
-      success: true,
-      data: newRoom,
-      message: 'Room created successfully'
+    return res.status(201).json({ 
+      success: true, 
+      data: newRoom, 
+      message: 'Room created successfully' 
     });
-
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Create room error:', error);
     
-    // Handle duplicate key error
-    if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message: 'Room name already exists'
+    if (error instanceof Error) {
+      const mongoError = error as MongoError;
+      if (mongoError.code === 11000) {
+        return res.status(409).json({ 
+          success: false, 
+          message: 'Room name already exists' 
+        });
+      }
+      
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Error creating room', 
+        error: mongoError.message 
       });
     }
-
-    return res.status(500).json({
-      success: false,
-      message: 'Error creating room',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Unknown error occurred while creating room' 
     });
   }
 };
 
-// Get all rooms
+// Get All Rooms
 export const getAllRooms = async (req: Request, res: Response): Promise<Response> => {
   try {
-    const { activeOnly } = req.query;
-    
-    const query: any = {};
-    if (activeOnly === 'true') {
-      query.isActive = true;
-    }
-
+    const activeOnly = req.query.activeOnly === 'true';
+    const query = activeOnly ? { isActive: true } : {};
     const rooms = await Room.find(query).sort({ name: 1 });
-
-    return res.status(200).json({
-      success: true,
-      data: rooms,
-      count: rooms.length
+    
+    return res.status(200).json({ 
+      success: true, 
+      data: rooms, 
+      count: rooms.length 
     });
-
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Get all rooms error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Error fetching rooms'
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Error fetching rooms',
+      error: errorMessage
     });
   }
 };
 
-// Get single room by ID
+// Get Room By ID
 export const getRoomById = async (req: Request, res: Response): Promise<Response> => {
   try {
     const { id } = req.params;
-    
     const room = await Room.findById(id);
     
     if (!room) {
-      return res.status(404).json({
-        success: false,
-        message: 'Room not found'
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Room not found' 
       });
     }
-
-    return res.status(200).json({
-      success: true,
-      data: room
+    
+    return res.status(200).json({ 
+      success: true, 
+      data: room 
     });
-
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Get room by ID error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Error fetching room'
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Error fetching room',
+      error: errorMessage
     });
   }
 };
 
-// Update room (admin only)
+// Update Room
 export const updateRoom = async (req: Request, res: Response): Promise<Response> => {
   try {
     const { id } = req.params;
-    const { name, capacity, description, amenities, isActive } = req.body;
+    const parsed = updateRoomSchema.safeParse(req.body);
+    
+    if (!parsed.success) {
+      return res.status(400).json({ 
+        success: false, 
+        message: parsed.error
+      });
+    }
 
     const room = await Room.findById(id);
-    
     if (!room) {
-      return res.status(404).json({
-        success: false,
-        message: 'Room not found'
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Room not found' 
       });
     }
 
-    // Update fields
-    if (name !== undefined) room.name = name;
-    if (capacity !== undefined) room.capacity = capacity;
-    if (description !== undefined) room.description = description;
-    if (amenities !== undefined) room.amenities = amenities;
-    if (isActive !== undefined) room.isActive = isActive;
-
+    Object.assign(room, parsed.data);
     await room.save();
 
-    return res.status(200).json({
-      success: true,
-      data: room,
-      message: 'Room updated successfully'
+    return res.status(200).json({ 
+      success: true, 
+      data: room, 
+      message: 'Room updated successfully' 
     });
-
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Update room error:', error);
     
-    if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message: 'Room name already exists'
+    if (error instanceof Error) {
+      const mongoError = error as MongoError;
+      if (mongoError.code === 11000) {
+        return res.status(409).json({ 
+          success: false, 
+          message: 'Room name already exists' 
+        });
+      }
+      
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Error updating room',
+        error: mongoError.message
       });
     }
-
-    return res.status(500).json({
-      success: false,
-      message: 'Error updating room'
+    
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Unknown error occurred while updating room' 
     });
   }
 };
 
-// Delete room (admin only - soft delete)
-// export const deleteRoom = async (req: Request, res: Response): Promise<Response> => {
-//   try {
-//     const { id } = req.params;
-
-//     const room = await Room.findById(id);
-    
-//     if (!room) {
-//       return res.status(404).json({
-//         success: false,
-//         message: 'Room not found'
-//       });
-//     }
-
-//     // Soft delete by marking as inactive
-//     room.isActive = false;
-//     await room.save();
-
-//     return res.status(200).json({
-//       success: true,
-//       message: 'Room deactivated successfully'
-//     });
-
-//   } catch (error: any) {
-//     console.error('Delete room error:', error);
-//     return res.status(500).json({
-//       success: false,
-//       message: 'Error deactivating room'
-//     });
-//   }
-// };
-
-// SOFT DELETE (make inactive)
+// Deactivate Room
 export const deactivateRoom = async (req: Request, res: Response): Promise<Response> => {
   try {
     const { id } = req.params;
-
     const room = await Room.findById(id);
-
+    
     if (!room) {
-      return res.status(404).json({ success: false, message: "Room not found" });
+      return res.status(404).json({ 
+        success: false, 
+        message: "Room not found" 
+      });
     }
 
     room.isActive = false;
     await room.save();
-
-    return res.status(200).json({
-      success: true,
-      message: "Room deactivated successfully"
+    
+    return res.status(200).json({ 
+      success: true, 
+      message: "Room deactivated successfully" 
     });
-
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Deactivate room error:", error);
-    return res.status(500).json({ success: false, message: "Error deactivating room" });
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    
+    return res.status(500).json({ 
+      success: false, 
+      message: "Error deactivating room",
+      error: errorMessage
+    });
   }
 };
 
-
-// ACTIVATE ROOM (undo soft delete)
+// Activate Room
 export const activateRoom = async (req: Request, res: Response): Promise<Response> => {
   try {
     const { id } = req.params;
-
     const room = await Room.findById(id);
-
+    
     if (!room) {
-      return res.status(404).json({ success: false, message: "Room not found" });
+      return res.status(404).json({ 
+        success: false, 
+        message: "Room not found" 
+      });
     }
 
     room.isActive = true;
     await room.save();
-
-    return res.status(200).json({
-      success: true,
-      message: "Room activated successfully"
+    
+    return res.status(200).json({ 
+      success: true, 
+      message: "Room activated successfully" 
     });
-
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Activate room error:", error);
-    return res.status(500).json({ success: false, message: "Error activating room" });
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    
+    return res.status(500).json({ 
+      success: false, 
+      message: "Error activating room",
+      error: errorMessage
+    });
   }
 };
 
-
-// PERMANENT DELETE (remove document)
+// Permanent Delete Room
 export const deleteRoomPermanent = async (req: Request, res: Response): Promise<Response> => {
   try {
     const { id } = req.params;
-
     const room = await Room.findById(id);
-
+    
     if (!room) {
-      return res.status(404).json({ success: false, message: "Room not found" });
+      return res.status(404).json({ 
+        success: false, 
+        message: "Room not found" 
+      });
     }
 
     await Room.findByIdAndDelete(id);
-
-    return res.status(200).json({
-      success: true,
-      message: "Room permanently deleted"
+    
+    return res.status(200).json({ 
+      success: true, 
+      message: "Room permanently deleted" 
     });
-
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Permanent delete error:", error);
-    return res.status(500).json({ success: false, message: "Error deleting room" });
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    
+    return res.status(500).json({ 
+      success: false, 
+      message: "Error deleting room",
+      error: errorMessage
+    });
   }
 };
 
+// -------------------- ROOM AVAILABILITY --------------------
 
-// Check room availability with date
+// Check Availability for a room or all rooms
 export const checkAvailability = async (req: Request, res: Response): Promise<Response> => {
   try {
-    const { date, roomId } = req.query;
-    
-    // Validate date
-    if (!date || typeof date !== 'string') {
-      return res.status(400).json({
-        success: false,
-        message: 'Date parameter is required and must be a string (YYYY-MM-DD)'
+    const parsed = dateQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({ 
+        success: false, 
+        message: parsed.error
       });
     }
 
+    const { date, roomId, showAll } = parsed.data;
     const targetDate = new Date(date);
-    
-    // Validate date format
-    if (isNaN(targetDate.getTime())) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid date format. Use YYYY-MM-DD'
-      });
-    }
 
-    // Build query for bookings
-    const query: any = {
-      startTime: {
-        $gte: new Date(targetDate.setHours(0, 0, 0, 0)),
-        $lt: new Date(targetDate.setHours(23, 59, 59, 999))
+    // Define query as a flexible Mongoose filter
+    const query: FilterQuery<Booking> = {
+      startTime: { 
+        $gte: new Date(targetDate.setHours(0, 0, 0, 0)), 
+        $lt: new Date(targetDate.setHours(23, 59, 59, 999)) 
       },
-      status: { $in: ['confirmed', 'pending'] }
+      status: { $in: ['confirmed', 'pending'] },
     };
 
-    // If roomId is specified, only check that room
-    if (roomId && typeof roomId === 'string') {
+    // Only add roomId if provided
+    if (roomId) {
       query.roomId = roomId;
-      
-      // Check if room exists and is active
+    }
+
+    if (roomId) {
       const room = await Room.findById(roomId);
       if (!room || !room.isActive) {
-        return res.status(404).json({
-          success: false,
-          message: 'Room not found or inactive'
+        return res.status(404).json({ 
+          success: false, 
+          message: 'Room not found or inactive' 
         });
       }
 
-      const bookings = await Booking.find(query).sort({ startTime: 1 });
-      
-      const availableSlots = calculateAvailableSlots(
-        bookings, 
-        targetDate,
-        9, // opening hour
-        18, // closing hour
-        30 // slot duration minutes
-      );
+      const bookings = await bookingSchema.find(query).sort({ startTime: 1 });
+      const availableSlots = calculateAvailableSlots(bookings, targetDate, 9, 18, 30);
 
       return res.status(200).json({
         success: true,
         data: {
-          room: {
-            id: room._id,
-            name: room.name,
-            capacity: room.capacity,
-            amenities: room.amenities
+          room: { 
+            id: room._id, 
+            name: room.name, 
+            capacity: room.capacity, 
+            amenities: room.amenities 
           },
           date: formatDateToYYYYMMDD(targetDate),
           availableSlots: availableSlots.map(slot => ({
@@ -356,42 +363,33 @@ export const checkAvailability = async (req: Request, res: Response): Promise<Re
         }
       });
     } else {
-      // Check all active rooms
       const activeRooms = await Room.find({ isActive: true });
-      const allBookings = await Booking.find(query);
-      
-      const availability = await Promise.all(
-        activeRooms.map(async (room) => {
-          const roomBookings = allBookings.filter(
-            booking => booking.roomId.toString() === room._id.toString()
-          );
-          
-          const availableSlots = calculateAvailableSlots(
-            roomBookings,
-            targetDate
-          );
+      const allBookings = await bookingSchema.find(query);
 
-          return {
-            room: {
-              id: room._id,
-              name: room.name,
-              capacity: room.capacity,
-              amenities: room.amenities
-            },
-            date: formatDateToYYYYMMDD(targetDate),
-            availableSlots: availableSlots.map(slot => ({
-              start: slot.start.toISOString(),
-              end: slot.end.toISOString(),
-              durationMinutes: slot.durationMinutes
-            })),
-            totalAvailableSlots: availableSlots.length,
-            isAvailable: availableSlots.length > 0
-          };
-        })
-      );
+      const availability = activeRooms.map(room => {
+        const roomBookings = allBookings.filter(
+          booking => booking.roomId.toString() === room._id.toString()
+        );
+        const availableSlots = calculateAvailableSlots(roomBookings, targetDate);
 
-      // Filter out rooms with no availability if requested
-      const { showAll } = req.query;
+        return {
+          room: { 
+            id: room._id, 
+            name: room.name, 
+            capacity: room.capacity, 
+            amenities: room.amenities 
+          },
+          date: formatDateToYYYYMMDD(targetDate),
+          availableSlots: availableSlots.map(slot => ({
+            start: slot.start.toISOString(),
+            end: slot.end.toISOString(),
+            durationMinutes: slot.durationMinutes
+          })),
+          totalAvailableSlots: availableSlots.length,
+          isAvailable: availableSlots.length > 0
+        };
+      });
+
       const filteredAvailability = showAll === 'true' 
         ? availability 
         : availability.filter(room => room.totalAvailableSlots > 0);
@@ -401,31 +399,60 @@ export const checkAvailability = async (req: Request, res: Response): Promise<Re
         data: filteredAvailability,
         date: formatDateToYYYYMMDD(targetDate),
         totalRooms: filteredAvailability.length,
-        roomsWithAvailability: filteredAvailability.filter(r => r.totalAvailableSlots > 0).length
+        roomsWithAvailability: filteredAvailability.filter(room => room.totalAvailableSlots > 0).length
       });
     }
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Check availability error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Error checking availability'
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Error checking availability', 
+      error: errorMessage 
     });
   }
 };
 
-// Get room bookings for a specific date
+// -------------------- Zod Schemas --------------------
+const getRoomBookingsSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format YYYY-MM-DD"),
+});
+
+const roomIdParamSchema = z.object({
+  roomId: z.string().min(1, "Room ID is required"),
+});
+
+const getRoomAvailabilityByDateSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format YYYY-MM-DD"),
+});
+
+// -------------------- Get Room Bookings --------------------
 export const getRoomBookings = async (req: Request, res: Response): Promise<Response> => {
   try {
-    const { roomId } = req.params;
-    const { date } = req.query;
-
-    if (!date || typeof date !== 'string') {
+    // Validate roomId parameter
+    const roomIdValidation = roomIdParamSchema.safeParse(req.params);
+    if (!roomIdValidation.success) {
       return res.status(400).json({
         success: false,
-        message: 'Date parameter is required (YYYY-MM-DD)'
+        message: 'Invalid room ID',
+        errors: roomIdValidation.error
       });
     }
+
+    // Validate date query parameter
+    const dateValidation = getRoomBookingsSchema.safeParse(req.query);
+    if (!dateValidation.success) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid date parameter',
+        errors: dateValidation.error
+      });
+    }
+
+    const { roomId } = roomIdValidation.data;
+    const { date } = dateValidation.data;
 
     // Check if room exists
     const room = await Room.findById(roomId);
@@ -437,10 +464,13 @@ export const getRoomBookings = async (req: Request, res: Response): Promise<Resp
     }
 
     const targetDate = new Date(date);
-    const startOfDay = new Date(targetDate.setHours(0, 0, 0, 0));
-    const endOfDay = new Date(targetDate.setHours(23, 59, 59, 999));
+    const startOfDay = new Date(targetDate);
+    startOfDay.setHours(0, 0, 0, 0);
+    
+    const endOfDay = new Date(targetDate);
+    endOfDay.setHours(23, 59, 59, 999);
 
-    const bookings = await Booking.find({
+    const bookings = await bookingSchema.find({
       roomId,
       startTime: { $gte: startOfDay },
       endTime: { $lte: endOfDay },
@@ -449,66 +479,108 @@ export const getRoomBookings = async (req: Request, res: Response): Promise<Resp
       .sort({ startTime: 1 })
       .populate('userId', 'name email');
 
+    const response = {
+      room: {
+        id: room._id,
+        name: room.name,
+        capacity: room.capacity
+      },
+      date: formatDateToYYYYMMDD(targetDate),
+      bookings: bookings.map(booking => ({
+        id: booking._id,
+        user: booking.userId,
+        startTime: booking.startTime,
+        endTime: booking.endTime,
+        status: booking.status
+      })),
+      totalBookings: bookings.length
+    };
+
     return res.status(200).json({
       success: true,
-      data: {
-        room: {
-          id: room._id,
-          name: room.name,
-          capacity: room.capacity
-        },
-        date: formatDateToYYYYMMDD(targetDate),
-        bookings: bookings.map(booking => ({
-          id: booking._id,
-          user: booking.userId,
-          startTime: booking.startTime,
-          endTime: booking.endTime,
-          status: booking.status
-        })),
-        totalBookings: bookings.length
-      }
+      data: response
     });
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Get room bookings error:', error);
+    
+    if (error instanceof Error) {
+      return res.status(500).json({
+        success: false,
+        message: 'Error fetching room bookings',
+        error: error.message
+      });
+    }
+    
     return res.status(500).json({
       success: false,
-      message: 'Error fetching room bookings'
+      message: 'Unknown error occurred while fetching room bookings'
     });
   }
 };
 
-export const getRoomAvailabilityByDate = async (req: Request, res: Response) => {
+// -------------------- Get Room Availability By Date --------------------
+export const getRoomAvailabilityByDate = async (req: Request, res: Response): Promise<Response> => {
   try {
-    const { date } = req.query as { date: string };
-    if (!date) return res.status(400).json({ success: false, message: "Date is required" });
+    // Validate date query parameter
+    const dateValidation = getRoomAvailabilityByDateSchema.safeParse(req.query);
+    if (!dateValidation.success) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid date parameter",
+        errors: dateValidation.error
+      });
+    }
 
+    const { date } = dateValidation.data;
     const targetDate = new Date(date);
-    if (isNaN(targetDate.getTime()))
-      return res.status(400).json({ success: false, message: "Invalid date format" });
+    
+    // Additional date validation
+    if (isNaN(targetDate.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid date format"
+      });
+    }
 
     // Fetch active rooms
     const activeRooms = await Room.find({ isActive: true });
-    if (!activeRooms) throw new Error("No active rooms found");
+    if (activeRooms.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No active rooms found"
+      });
+    }
 
     const DAYS_RANGE = 7; // Number of days to check availability
-    const endDate = new Date(targetDate.getTime() + (DAYS_RANGE - 1) * 24 * 60 * 60 * 1000);
+    const endDate = new Date(targetDate);
+    endDate.setDate(targetDate.getDate() + DAYS_RANGE - 1);
+    endDate.setHours(23, 59, 59, 999);
+
+    const startOfRange = new Date(targetDate);
+    startOfRange.setHours(0, 0, 0, 0);
 
     // Fetch bookings for the date range
-    const bookings = await Booking.find({
-      startTime: { $gte: targetDate, $lt: new Date(endDate.getTime() + 24 * 60 * 60 * 1000) },
+    const bookings = await bookingSchema.find({
+      startTime: { $gte: startOfRange, $lt: endDate },
       status: { $in: ["confirmed", "pending"] },
     });
 
-    const availability = activeRooms.map((room) => {
-      const roomBookings = bookings.filter((b) => b.roomId.toString() === room._id.toString());
+    const availability: RoomAvailabilityData[] = activeRooms.map((room) => {
+      const roomBookings = bookings.filter((b) => 
+        b.roomId.toString() === room._id.toString()
+      );
 
       // Generate day-wise availability
       const availableSlots: string[] = [];
       for (let i = 0; i < DAYS_RANGE; i++) {
-        const currentDate = new Date(targetDate.getTime() + i * 24 * 60 * 60 * 1000);
-        const dayStart = new Date(currentDate.setHours(0, 0, 0, 0));
-        const dayEnd = new Date(currentDate.setHours(23, 59, 59, 999));
+        const currentDate = new Date(targetDate);
+        currentDate.setDate(targetDate.getDate() + i);
+        currentDate.setHours(0, 0, 0, 0);
+        
+        const dayStart = new Date(currentDate);
+        const dayEnd = new Date(currentDate);
+        dayEnd.setHours(23, 59, 59, 999);
 
         const bookingsForDay = roomBookings.filter(
           (b) => b.startTime >= dayStart && b.startTime <= dayEnd
@@ -524,11 +596,11 @@ export const getRoomAvailabilityByDate = async (req: Request, res: Response) => 
           id: room._id.toString(),
           name: room.name,
           capacity: room.capacity,
-          amenities: room.amenities,
-          description: room.description,
+          amenities: room.amenities || [],
+          description: room.description || '',
         },
         date: targetDate.toISOString().split("T")[0],
-        availableSlots, // now this is array of available dates
+        availableSlots,
         totalAvailableSlots: availableSlots.length,
         isAvailable: availableSlots.length > 0,
         totalBookings: roomBookings.length,
@@ -537,59 +609,135 @@ export const getRoomAvailabilityByDate = async (req: Request, res: Response) => 
       };
     });
 
-    res.status(200).json({
+    const roomsWithAvailability = availability.filter((r) => r.isAvailable).length;
+
+    return res.status(200).json({
       success: true,
       data: availability,
-      totalRooms: availability.length,
-      roomsWithAvailability: availability.filter((r) => r.isAvailable).length,
+      meta: {
+        date: targetDate.toISOString().split("T")[0],
+        daysRange: DAYS_RANGE,
+        totalRooms: availability.length,
+        roomsWithAvailability,
+        percentageAvailable: availability.length > 0 
+          ? Math.round((roomsWithAvailability / availability.length) * 100) 
+          : 0
+      }
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error in getRoomAvailabilityByDate:", error);
-    res.status(500).json({
+    
+    if (error instanceof Error) {
+      return res.status(500).json({
+        success: false,
+        message: "Internal server error",
+        error: error.message
+      });
+    }
+    
+    return res.status(500).json({
       success: false,
-      message: "Internal server error",
-      error: error.message,
-      stack: error.stack,
+      message: "Unknown error occurred while fetching room availability"
     });
   }
 };
+// -------------------- Zod Schemas --------------------
+const getRoomAvailabilityBySlotsSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format YYYY-MM-DD"),
+});
 
-
-
-// all room availability by slots
-export const getRoomAvailabilityBySlots = async (req: Request, res: Response) => {
+// -------------------- Get Room Availability By Slots --------------------
+export const getRoomAvailabilityBySlots = async (
+  req: Request,
+  res: Response
+): Promise<Response> => {
   try {
-    const { date } = req.query as { date: string };
-    if (!date) return res.status(400).json({ success: false, message: "Date is required" });
+    // Validate query parameters
+    const validationResult = getRoomAvailabilityBySlotsSchema.safeParse(req.query);
+    if (!validationResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: validationResult.error
+      });
+    }
 
+    const { date } = validationResult.data;
     const targetDate = new Date(date);
-    if (isNaN(targetDate.getTime())) return res.status(400).json({ success: false, message: "Invalid date format" });
+    
+    // Additional date validation
+    if (isNaN(targetDate.getTime())) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Invalid date format" 
+      });
+    }
 
     // Fetch active rooms
     const activeRooms = await Room.find({ isActive: true });
-    if (!activeRooms) throw new Error("No active rooms found");
+    if (activeRooms.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "No active rooms found" 
+      });
+    }
 
-    const startOfDay = new Date(targetDate.setHours(0, 0, 0, 0));
-    const endOfDay = new Date(targetDate.setHours(23, 59, 59, 999));
+    // Set up date range for the day
+    const startOfDay = new Date(targetDate);
+    startOfDay.setHours(0, 0, 0, 0);
+    
+    const endOfDay = new Date(targetDate);
+    endOfDay.setHours(23, 59, 59, 999);
 
-    const bookings = await Booking.find({
+    // Fetch bookings for the day
+    const bookings = await bookingSchema.find({
       startTime: { $gte: startOfDay, $lt: endOfDay },
       status: { $in: ["confirmed", "pending"] },
     });
 
-    const availability = activeRooms.map((room) => {
-      const roomBookings = bookings.filter((b) => b.roomId.toString() === room._id.toString());
+    const availability: RoomAvailabilitySlots[] = activeRooms.map((room) => {
+      const roomBookings = bookings.filter((booking) => 
+        booking.roomId.toString() === room._id.toString()
+      );
 
-      // Make sure calculateAvailableSlots is imported and works
+      // Calculate available slots
       const availableSlotsRaw = calculateAvailableSlots(roomBookings, targetDate, 9, 18, 30);
-      if (!availableSlotsRaw) throw new Error("calculateAvailableSlots returned undefined");
+      
+      // Handle potential null/undefined from calculateAvailableSlots
+      if (!availableSlotsRaw || !Array.isArray(availableSlotsRaw)) {
+        return {
+          room: {
+            id: room._id.toString(),
+            name: room.name,
+            capacity: room.capacity,
+            amenities: room.amenities || [],
+            description: room.description || '',
+          },
+          date: targetDate.toISOString().split("T")[0],
+          availableSlots: [],
+          totalAvailableSlots: 0,
+          isAvailable: false,
+          totalBookings: roomBookings.length,
+          nextAvailableSlot: null,
+          lastAvailableSlot: null,
+        };
+      }
 
+      // Format available slots
       const availableSlots = availableSlotsRaw.map((slot) => ({
         start: slot.start.toISOString(),
         end: slot.end.toISOString(),
         durationMinutes: slot.durationMinutes,
-        startTime: slot.start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        endTime: slot.end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        startTime: slot.start.toLocaleTimeString([], { 
+          hour: "2-digit", 
+          minute: "2-digit",
+          hour12: false 
+        }),
+        endTime: slot.end.toLocaleTimeString([], { 
+          hour: "2-digit", 
+          minute: "2-digit",
+          hour12: false 
+        }),
       }));
 
       return {
@@ -597,8 +745,8 @@ export const getRoomAvailabilityBySlots = async (req: Request, res: Response) =>
           id: room._id.toString(),
           name: room.name,
           capacity: room.capacity,
-          amenities: room.amenities,
-          description: room.description,
+          amenities: room.amenities || [],
+          description: room.description || '',
         },
         date: targetDate.toISOString().split("T")[0],
         availableSlots,
@@ -610,19 +758,36 @@ export const getRoomAvailabilityBySlots = async (req: Request, res: Response) =>
       };
     });
 
-    res.status(200).json({
+    const roomsWithAvailability = availability.filter((room) => room.isAvailable).length;
+
+    return res.status(200).json({
       success: true,
       data: availability,
-      totalRooms: availability.length,
-      roomsWithAvailability: availability.filter((r) => r.isAvailable).length,
+      meta: {
+        date: targetDate.toISOString().split("T")[0],
+        totalRooms: availability.length,
+        roomsWithAvailability,
+        roomsWithNoAvailability: availability.length - roomsWithAvailability,
+        percentageAvailable: availability.length > 0 
+          ? Math.round((roomsWithAvailability / availability.length) * 100) 
+          : 0
+      }
     });
-  } catch (error: any) {
-    console.error("Error in getRoomAvailabilityByDate:", error);
-    res.status(500).json({
+
+  } catch (error: unknown) {
+    console.error("Error in getRoomAvailabilityBySlots:", error);
+    
+    if (error instanceof Error) {
+      return res.status(500).json({
+        success: false,
+        message: "Internal server error",
+        error: error.message
+      });
+    }
+    
+    return res.status(500).json({
       success: false,
-      message: "Internal server error",
-      error: error.message,
-      stack: error.stack,
+      message: "Unknown error occurred while fetching room availability by slots"
     });
   }
 };

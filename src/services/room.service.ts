@@ -30,10 +30,92 @@
 //     return availableRooms;
 // };
 
+import { z } from 'zod';
 import Room from '../models/room.model';
 import BookingModel from '../models/booking.model';
-import { calculateAvailableSlots, formatDateToYYYYMMDD } from '../utils/date.util';
-import { Booking, RoomAvailability, AvailableSlotResponse } from '../types/index'
+import { 
+  calculateAvailableSlots, 
+  formatDateToYYYYMMDD 
+} from '../utils/date.util';
+import { 
+  Booking, 
+  RoomAvailability, 
+  AvailableSlotResponse,
+  Room as RoomType 
+} from '../types/index';
+import { FilterQuery, Types } from 'mongoose';
+
+// -------------------- Zod Schemas --------------------
+const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, {
+  message: "Invalid date format. Use YYYY-MM-DD"
+});
+
+const roomIdSchema = z.string().min(1, "Room ID is required");
+
+const checkAvailabilitySchema = z.object({
+  date: dateSchema,
+  openingHour: z.number().min(0).max(23).optional(),
+  closingHour: z.number().min(1).max(24).optional(),
+  slotDuration: z.number().min(15).max(180).optional(),
+  includeInactiveRooms: z.boolean().optional(),
+});
+
+const singleRoomAvailabilitySchema = z.object({
+  date: dateSchema,
+  openingHour: z.number().min(0).max(23).optional(),
+  closingHour: z.number().min(1).max(24).optional(),
+  slotDuration: z.number().min(15).max(180).optional(),
+});
+
+const timeSlotAvailabilitySchema = z.object({
+  roomId: roomIdSchema,
+  startTime: z.date(),
+  endTime: z.date(),
+  excludeBookingId: z.string().optional(),
+});
+
+const occupancySchema = z.object({
+  roomId: roomIdSchema,
+  startDate: dateSchema,
+  endDate: dateSchema,
+});
+
+// -------------------- Types --------------------
+interface AvailabilityOptions {
+  openingHour?: number;
+  closingHour?: number;
+  slotDuration?: number;
+  includeInactiveRooms?: boolean;
+}
+
+interface RoomOccupancyResult {
+  room: {
+    id: string;
+    name: string;
+    capacity: number;
+  };
+  dateRange: {
+    start: string;
+    end: string;
+  };
+  bookings: Booking[];
+  occupancyRate: number;
+}
+
+// -------------------- Helper Functions --------------------
+function isValidDate(date: Date): boolean {
+  return !isNaN(date.getTime());
+}
+
+function validateDateString(dateString: string): Date {
+  const date = new Date(dateString);
+  if (!isValidDate(date)) {
+    throw new Error('Invalid date format. Use YYYY-MM-DD');
+  }
+  return date;
+}
+
+// -------------------- Main Functions --------------------
 
 // Get bookings for a room on a specific date
 export const getBookingsForRoom = async (
@@ -41,49 +123,72 @@ export const getBookingsForRoom = async (
   date: string
 ): Promise<Booking[]> => {
   try {
-    const startOfDay = new Date(date + 'T00:00:00.000Z');
-    const endOfDay = new Date(date + 'T23:59:59.999Z');
+    // Validate inputs
+    const validatedRoomId = roomIdSchema.parse(roomId);
+    const validatedDate = dateSchema.parse(date);
+
+    const startOfDay = new Date(validatedDate + 'T00:00:00.000Z');
+    const endOfDay = new Date(validatedDate + 'T23:59:59.999Z');
 
     const bookings = await BookingModel.find({
-      roomId,
+      roomId: validatedRoomId,
       startTime: { $gte: startOfDay },
       endTime: { $lte: endOfDay },
-      status: { $in: ['confirmed', 'pending'] } // Only active bookings
-    }).sort({ startTime: 1 });
+      status: { $in: ['confirmed', 'pending'] }
+    }).sort({ startTime: 1 }).lean();
 
-    return bookings;
-  } catch (error) {
+    return bookings as Booking[];
+  } catch (error: unknown) {
     console.error(`Error fetching bookings for room ${roomId} on ${date}:`, error);
-    throw error;
+    
+    if (error instanceof z.ZodError) {
+      throw new Error(`Validation error: ${error}`);
+    }
+    
+    if (error instanceof Error) {
+      throw error;
+    }
+    
+    throw new Error('Unknown error occurred while fetching bookings');
   }
 };
 
 // Check availability for all rooms on a specific date
 export const checkRoomAvailability = async (
   date: string,
-  options: {
-    openingHour?: number;
-    closingHour?: number;
-    slotDuration?: number;
-    includeInactiveRooms?: boolean;
-  } = {}
+  options: AvailabilityOptions = {}
 ): Promise<RoomAvailability[]> => {
   try {
-    const {
+    // Validate and parse options
+    const validationResult = checkAvailabilitySchema.safeParse({ 
+      date, 
+      ...options 
+    });
+    
+    if (!validationResult.success) {
+      throw new Error(
+        `Validation error: ${validationResult.error}`
+      );
+    }
+
+    const { 
+      date: validatedDate,
       openingHour = 9,
       closingHour = 18,
       slotDuration = 30,
       includeInactiveRooms = false
-    } = options;
+    } = validationResult.data;
 
     // Validate date
-    const targetDate = new Date(date);
-    if (isNaN(targetDate.getTime())) {
-      throw new Error('Invalid date format. Use YYYY-MM-DD');
+    const targetDate = validateDateString(validatedDate);
+
+    // Validate time constraints
+    if (openingHour >= closingHour) {
+      throw new Error('Opening hour must be before closing hour');
     }
 
     // Build room query
-    const roomQuery: any = {};
+    const roomQuery: FilterQuery<RoomType> = {};
     if (!includeInactiveRooms) {
       roomQuery.isActive = true;
     }
@@ -91,7 +196,7 @@ export const checkRoomAvailability = async (
     // Fetch all rooms
     const rooms = await Room.find(roomQuery).sort({ name: 1 });
 
-    // Fetch all bookings for the date (more efficient than per-room queries)
+    // Fetch all bookings for the date
     const startOfDay = new Date(targetDate);
     startOfDay.setHours(0, 0, 0, 0);
     
@@ -102,7 +207,7 @@ export const checkRoomAvailability = async (
       startTime: { $gte: startOfDay },
       endTime: { $lte: endOfDay },
       status: { $in: ['confirmed', 'pending'] }
-    }).sort({ startTime: 1 });
+    }).sort({ startTime: 1 }).lean();
 
     const availableRooms: RoomAvailability[] = [];
 
@@ -111,7 +216,7 @@ export const checkRoomAvailability = async (
       // Filter bookings for this specific room
       const roomBookings = allBookings.filter(
         booking => booking.roomId.toString() === room._id.toString()
-      );
+      ) as Booking[];
 
       // Calculate available slots
       const availableSlots = calculateAvailableSlots(
@@ -127,8 +232,16 @@ export const checkRoomAvailability = async (
         start: slot.start.toISOString(),
         end: slot.end.toISOString(),
         durationMinutes: slot.durationMinutes,
-        startTime: slot.start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        endTime: slot.end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        startTime: slot.start.toLocaleTimeString([], { 
+          hour: '2-digit', 
+          minute: '2-digit',
+          hour12: false 
+        }),
+        endTime: slot.end.toLocaleTimeString([], { 
+          hour: '2-digit', 
+          minute: '2-digit',
+          hour12: false 
+        })
       }));
 
       // Add room to results
@@ -137,8 +250,8 @@ export const checkRoomAvailability = async (
           id: room._id.toString(),
           name: room.name,
           capacity: room.capacity,
-          amenities: room.amenities,
-          description: room.description
+          amenities: room.amenities || [],
+          description: room.description || ''
         },
         date: formatDateToYYYYMMDD(targetDate),
         availableSlots: formattedSlots,
@@ -146,14 +259,21 @@ export const checkRoomAvailability = async (
         isAvailable: formattedSlots.length > 0,
         totalBookings: roomBookings.length,
         nextAvailableSlot: formattedSlots.length > 0 ? formattedSlots[0].start : null,
-        lastAvailableSlot: formattedSlots.length > 0 ? formattedSlots[formattedSlots.length - 1].start : null
+        lastAvailableSlot: formattedSlots.length > 0 
+          ? formattedSlots[formattedSlots.length - 1].start 
+          : null
       });
     }
 
     return availableRooms;
-  } catch (error) {
+  } catch (error: unknown) {
     console.error('Error checking room availability:', error);
-    throw error;
+    
+    if (error instanceof Error) {
+      throw error;
+    }
+    
+    throw new Error('Unknown error occurred while checking room availability');
   }
 };
 
@@ -161,33 +281,48 @@ export const checkRoomAvailability = async (
 export const checkSingleRoomAvailability = async (
   roomId: string,
   date: string,
-  options: {
-    openingHour?: number;
-    closingHour?: number;
-    slotDuration?: number;
-  } = {}
+  options: Omit<AvailabilityOptions, 'includeInactiveRooms'> = {}
 ): Promise<RoomAvailability | null> => {
   try {
-    const {
+    // Validate inputs
+    const validationResult = singleRoomAvailabilitySchema.safeParse({ 
+      date, 
+      ...options 
+    });
+    
+    if (!validationResult.success) {
+      throw new Error(
+        `Validation error: ${validationResult.error}`
+      );
+    }
+
+    const { 
+      date: validatedDate,
       openingHour = 9,
       closingHour = 18,
       slotDuration = 30
-    } = options;
+    } = validationResult.data;
 
     // Validate date
-    const targetDate = new Date(date);
-    if (isNaN(targetDate.getTime())) {
-      throw new Error('Invalid date format. Use YYYY-MM-DD');
+    const targetDate = validateDateString(validatedDate);
+
+    // Validate time constraints
+    if (openingHour >= closingHour) {
+      throw new Error('Opening hour must be before closing hour');
     }
 
     // Check if room exists and is active
     const room = await Room.findById(roomId);
-    if (!room || !room.isActive) {
-      throw new Error('Room not found or inactive');
+    if (!room) {
+      throw new Error('Room not found');
+    }
+    
+    if (!room.isActive) {
+      throw new Error('Room is inactive');
     }
 
     // Get bookings for the room on the specified date
-    const bookings = await getBookingsForRoom(roomId, date);
+    const bookings = await getBookingsForRoom(roomId, validatedDate);
 
     // Calculate available slots
     const availableSlots = calculateAvailableSlots(
@@ -203,8 +338,16 @@ export const checkSingleRoomAvailability = async (
       start: slot.start.toISOString(),
       end: slot.end.toISOString(),
       durationMinutes: slot.durationMinutes,
-      startTime: slot.start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      endTime: slot.end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      startTime: slot.start.toLocaleTimeString([], { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: false 
+      }),
+      endTime: slot.end.toLocaleTimeString([], { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: false 
+      })
     }));
 
     return {
@@ -212,8 +355,8 @@ export const checkSingleRoomAvailability = async (
         id: room._id.toString(),
         name: room.name,
         capacity: room.capacity,
-        amenities: room.amenities,
-        description: room.description
+        amenities: room.amenities || [],
+        description: room.description || ''
       },
       date: formatDateToYYYYMMDD(targetDate),
       availableSlots: formattedSlots,
@@ -221,11 +364,18 @@ export const checkSingleRoomAvailability = async (
       isAvailable: formattedSlots.length > 0,
       totalBookings: bookings.length,
       nextAvailableSlot: formattedSlots.length > 0 ? formattedSlots[0].start : null,
-      lastAvailableSlot: formattedSlots.length > 0 ? formattedSlots[formattedSlots.length - 1].start : null
+      lastAvailableSlot: formattedSlots.length > 0 
+        ? formattedSlots[formattedSlots.length - 1].start 
+        : null
     };
-  } catch (error) {
+  } catch (error: unknown) {
     console.error(`Error checking availability for room ${roomId}:`, error);
-    throw error;
+    
+    if (error instanceof Error) {
+      throw error;
+    }
+    
+    throw new Error('Unknown error occurred while checking room availability');
   }
 };
 
@@ -237,24 +387,56 @@ export const isTimeSlotAvailable = async (
   excludeBookingId?: string
 ): Promise<boolean> => {
   try {
-    const query: any = {
-      roomId,
-      startTime: { $lt: endTime },
-      endTime: { $gt: startTime },
-      status: { $in: ['confirmed', 'pending'] }
+    // Validate inputs
+    const validationResult = timeSlotAvailabilitySchema.safeParse({ 
+      roomId, 
+      startTime, 
+      endTime, 
+      excludeBookingId 
+    });
+    
+    if (!validationResult.success) {
+      throw new Error(
+        `Validation error: ${validationResult.error}`
+      );
+    }
+
+    const { 
+      roomId: validatedRoomId, 
+      startTime: validatedStartTime, 
+      endTime: validatedEndTime,
+      excludeBookingId: validatedExcludeBookingId 
+    } = validationResult.data;
+
+    // Validate time order
+    if (validatedStartTime >= validatedEndTime) {
+      throw new Error('Start time must be before end time');
+    }
+
+    // Build query
+    const query: FilterQuery<Booking> = {
+      roomId: validatedRoomId,
+      startTime: { $lt: validatedEndTime },
+      endTime: { $gt: validatedStartTime },
+      status: { $in: ['confirmed', 'pending'] as const }
     };
 
     // Exclude current booking when checking for rescheduling
-    if (excludeBookingId) {
-      query._id = { $ne: excludeBookingId };
+    if (validatedExcludeBookingId) {
+      query._id = { $ne: new Types.ObjectId(validatedExcludeBookingId) };
     }
 
     const conflictingBookings = await BookingModel.find(query);
 
     return conflictingBookings.length === 0;
-  } catch (error) {
+  } catch (error: unknown) {
     console.error('Error checking time slot availability:', error);
-    throw error;
+    
+    if (error instanceof Error) {
+      throw error;
+    }
+    
+    throw new Error('Unknown error occurred while checking time slot availability');
   }
 };
 
@@ -263,27 +445,49 @@ export const getRoomOccupancy = async (
   roomId: string,
   startDate: string,
   endDate: string
-): Promise<{
-  room: any;
-  dateRange: { start: string; end: string };
-  bookings: Booking[];
-  occupancyRate: number;
-}> => {
+): Promise<RoomOccupancyResult> => {
   try {
-    const start = new Date(startDate + 'T00:00:00.000Z');
-    const end = new Date(endDate + 'T23:59:59.999Z');
+    // Validate inputs
+    const validationResult = occupancySchema.safeParse({ 
+      roomId, 
+      startDate, 
+      endDate 
+    });
+    
+    if (!validationResult.success) {
+      throw new Error(
+        `Validation error: ${validationResult.error}`
+      );
+    }
 
-    const room = await Room.findById(roomId);
+    const { 
+      roomId: validatedRoomId, 
+      startDate: validatedStartDate, 
+      endDate: validatedEndDate 
+    } = validationResult.data;
+
+    // Validate dates
+    const start = validateDateString(validatedStartDate + 'T00:00:00.000Z');
+    const end = validateDateString(validatedEndDate + 'T23:59:59.999Z');
+
+    // Validate date range
+    if (start > end) {
+      throw new Error('Start date must be before end date');
+    }
+
+    const room = await Room.findById(validatedRoomId);
     if (!room) {
       throw new Error('Room not found');
     }
 
     const bookings = await BookingModel.find({
-      roomId,
+      roomId: validatedRoomId,
       startTime: { $gte: start },
       endTime: { $lte: end },
       status: 'confirmed'
-    }).sort({ startTime: 1 });
+    })
+      .sort({ startTime: 1 })
+      .lean() as Booking[];
 
     // Calculate total business hours in the date range
     const totalHours = calculateBusinessHours(start, end);
@@ -310,29 +514,119 @@ export const getRoomOccupancy = async (
       bookings,
       occupancyRate: parseFloat(occupancyRate.toFixed(2))
     };
-  } catch (error) {
+  } catch (error: unknown) {
     console.error('Error getting room occupancy:', error);
-    throw error;
+    
+    if (error instanceof Error) {
+      throw error;
+    }
+    
+    throw new Error('Unknown error occurred while getting room occupancy');
   }
 };
 
 // Helper function to calculate business hours
 const calculateBusinessHours = (start: Date, end: Date): number => {
-  const openingHour = 9;
-  const closingHour = 18;
+  const OPENING_HOUR = 9;
+  const CLOSING_HOUR = 18;
   
   let totalHours = 0;
   const current = new Date(start);
+  current.setHours(0, 0, 0, 0);
   
-  while (current <= end) {
+  const endDate = new Date(end);
+  endDate.setHours(23, 59, 59, 999);
+  
+  while (current <= endDate) {
     // Skip weekends (optional)
     const dayOfWeek = current.getDay();
     if (dayOfWeek !== 0 && dayOfWeek !== 6) { // 0 = Sunday, 6 = Saturday
-      totalHours += (closingHour - openingHour);
+      totalHours += (CLOSING_HOUR - OPENING_HOUR);
     }
     
     current.setDate(current.getDate() + 1);
   }
   
   return totalHours;
+};
+
+// Additional utility function: Get busiest times for a room
+export const getBusiestTimes = async (
+  roomId: string,
+  startDate: string,
+  endDate: string
+): Promise<{
+  room: { id: string; name: string };
+  dateRange: { start: string; end: string };
+  hourlyDistribution: Array<{ hour: number; count: number; percentage: number }>;
+  peakHour: number;
+}> => {
+  try {
+    const { 
+      roomId: validatedRoomId, 
+      startDate: validatedStartDate, 
+      endDate: validatedEndDate 
+    } = occupancySchema.parse({ roomId, startDate, endDate });
+
+    const start = validateDateString(validatedStartDate + 'T00:00:00.000Z');
+    const end = validateDateString(validatedEndDate + 'T23:59:59.999Z');
+
+    const room = await Room.findById(validatedRoomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+
+    const bookings = await BookingModel.find({
+      roomId: validatedRoomId,
+      startTime: { $gte: start },
+      endTime: { $lte: end },
+      status: 'confirmed'
+    }).lean() as Booking[];
+
+    // Initialize hourly distribution
+    const hourlyDistribution: Array<{ hour: number; count: number; percentage: number }> = [];
+    for (let hour = 0; hour < 24; hour++) {
+      hourlyDistribution[hour] = { hour, count: 0, percentage: 0 };
+    }
+
+    // Count bookings per hour
+    bookings.forEach(booking => {
+      const startHour = booking.startTime.getHours();
+      const endHour = booking.endTime.getHours();
+      
+      for (let hour = startHour; hour < endHour; hour++) {
+        if (hour >= 0 && hour < 24) {
+          hourlyDistribution[hour].count++;
+        }
+      }
+    });
+
+    // Calculate percentages
+    const totalCount = hourlyDistribution.reduce((sum, item) => sum + item.count, 0);
+    hourlyDistribution.forEach(item => {
+      item.percentage = totalCount > 0 ? (item.count / totalCount) * 100 : 0;
+    });
+
+    // Find peak hour
+    const peakHour = hourlyDistribution.reduce(
+      (max, item, index) => item.count > max.count ? { ...item, hour: index } : max,
+      { hour: 0, count: 0, percentage: 0 }
+    ).hour;
+
+    return {
+      room: {
+        id: room._id.toString(),
+        name: room.name
+      },
+      dateRange: {
+        start: start.toISOString(),
+        end: end.toISOString()
+      },
+      hourlyDistribution,
+      peakHour
+    };
+  } catch (error: unknown) {
+    console.error('Error getting busiest times:', error);
+    throw error instanceof Error ? error : new Error('Unknown error occurred');
+  }
 };

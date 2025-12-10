@@ -46,7 +46,7 @@ export const calculateAvailableSlots = (
     const slotStart = time;
     const slotEnd = time + slotDurationMinutes * 60000;
 
-    // Check if slot overlaps with any booking
+    // Check if slot overlaps with booking
     const isOccupied = bookedRanges.some(booked => {
       return slotStart < booked.end && slotEnd > booked.start;
     });
