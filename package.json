@@ -2,13 +2,13 @@
   "name": "max-room-booking-backend",
   "version": "1.0.0",
   "description": "A mini Booking Management System for reserving meeting rooms.",
-  "main": "dist/server.js",
+  "main": "dist/app.ts",
   "scripts": {
     "prebuild": "rm -rf dist || true",
     "build": "tsc --skipLibCheck",
     "postbuild": "echo 'Build completed successfully'",
-    "start": "node dist/server.js",
-    "dev": "nodemon src/server.ts",
+    "start": "node dist/app.ts",
+    "dev": "nodemon src/app.ts",
     "type-check": "tsc --noEmit",
     "test": "jest"
   },
