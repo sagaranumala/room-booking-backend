@@ -5,10 +5,9 @@
   "main": "dist/app.ts",
   "scripts": {
     "prebuild": "rm -rf dist || true",
-    "build": "tsc --skipLibCheck",
-    "postbuild": "echo 'Build completed successfully'",
-    "start": "node dist/app.ts",
-    "dev": "nodemon src/app.ts",
+    "build": "tsc",
+    "start": "node dist/app.js",
+    "dev": "ts-node src/app.ts",
     "type-check": "tsc --noEmit",
     "test": "jest"
   },
