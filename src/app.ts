@@ -60,6 +60,19 @@ const NODE_ENV: string = process.env.NODE_ENV || 'development';
 // Create HTTP server (for Socket.io)
 const httpServer: HTTPServer = createServer(app);
 
+app.use(
+  cors({
+    origin: [
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+      "https://room-booking-ui-8q4m.onrender.com",
+    ],
+    credentials: true,
+    methods: "GET,POST,PUT,DELETE,PATCH,OPTIONS",
+    allowedHeaders: "Content-Type,Authorization",
+  })
+);
+
 // Initialize Socket.io (optional, for real-time features)
 const io: Server = new Server(httpServer, {
   cors: {
