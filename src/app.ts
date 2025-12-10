@@ -232,7 +232,7 @@ const connectDB = async (): Promise<void> => {
 // -------------------- Health Check & Monitoring --------------------
 
 app.get('/health', (req: Request, res: Response) => {
-  const healthcheck: ApiResponse = {
+  const healthcheck = {
     success: true,
     data: {
       status: 'OK',
